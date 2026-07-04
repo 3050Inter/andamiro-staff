@@ -1,14 +1,21 @@
-# 안다미로 직원관리 V7
+# 안다미로 직원관리 V14 - 공지사항
 
-## 이번 버전 핵심
-- 홈페이지가 `/api/masterdb` 서버 프록시를 통해 Apps Script를 읽습니다.
-- 브라우저 CORS 문제를 피합니다.
-- MASTER_DB V6 시트 ID가 Apps Script에 고정되어 있습니다.
-- 직원관리/휴무입력/근무인원/보건증/인센티브요약을 실제로 읽습니다.
+## 추가 내용
+- 메뉴에 `공지사항` 추가
+- Dashboard 상단에 최신 공지 5개 표시
+- 공지 작성/저장 기능
+- 공지 삭제 기능
+- MASTER_DB에 `공지사항` 시트 자동 생성
+- 공지 컬럼: 작성일, 제목, 내용, 작성자, 입력시간
+- 여름휴가 일정 등 자유롭게 작성 가능
 
 ## 적용 순서
-1. `apps-script.js` 내용을 Apps Script에 전체 교체
-2. 저장 후 배포 관리에서 새 버전 배포
-3. 이 폴더 파일 전체를 기존 GitHub `andamiro-staff` 폴더에 덮어쓰기
-4. GitHub Desktop에서 commit & push
-5. Vercel 자동 배포 완료 후 홈페이지 새로고침
+1. 기존 `andamiro-staff` 폴더에 이 ZIP 내용 전체 덮어쓰기
+2. `apps-script.js` 내용을 Google Apps Script에 전체 교체
+3. 저장 후 배포 관리에서 새 버전 배포
+4. GitHub Desktop에서 Commit → Push
+5. Vercel 자동 배포 확인
+
+## 테스트
+- `npm ci` 성공
+- `npm run build` 성공

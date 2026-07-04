@@ -1,85 +1,410 @@
-const SPREADSHEET_ID = '1O-v-26uvnmj9B2n1pB98DMl1IV9mB3s-y9w0elcIMqU';
+// 안다미로 직원관리 홈페이지 API - MASTER_DB V6/V13
+// 휴무 입력 저장 + 휴무갯수/인센티브변동 기록 + 토/일/공휴일 근무 인센티브 자동 적립
+const MASTER_DB_ID = '1O-v-26uvnmj9B2n1pB98DMl1IV9mB3s-y9w0elcIMqU';
+
 const V6 = {
-  dashboard: '00_Dashboard', employees: '직원관리', newEmployee: '신규입사_입력', resign: '퇴사자_입력', leave: '휴무입력', publicHolidays: '공휴일입력', incentiveBase: '인센티브기초값', incentiveOriginal: '기존인센티브현황_원본', manualAdjust: '수기조정', incentiveLog: '인센티브로그', incentiveSummary: '인센티브요약', staffing: '근무인원', health: '보건증현황', manual: '사용방법', homepageLog: '홈페이지로그'
-};
-function ss(){ return SpreadsheetApp.openById(SPREADSHEET_ID); }
-function sheet(name){ return ss().getSheetByName(name); }
-function doGet(e){
-  const p = (e && e.parameter) || {};
-  return out(handle(p.action || 'all', p));
-}
-function doPost(e){
-  try { const body = JSON.parse(e.postData && e.postData.contents || '{}'); return out(handle(body.action || 'all', body)); }
-  catch(err){ return out({ok:false,error:String(err && err.message || err)}); }
-}
-function handle(action, body){
-  try{
-    if(action === 'ping') return {ok:true, spreadsheet:ss().getName(), version:'v7-real-data-20260704'};
-    if(action === 'all' || action === 'summary') return all(body);
-    if(action === 'sheet') return {ok:true, rows: table(body.name || V6.employees)};
-    if(action === 'saveLeave') return saveLeave(body);
-    return all(body);
-  }catch(err){ return {ok:false,error:String(err && err.message || err), stack:String(err && err.stack || '')}; }
-}
-function all(body){
-  const s = ss();
-  const names = s.getSheets().map(x=>x.getName());
-  const employees = table(V6.employees);
-  const leave = table(V6.leave);
-  const health = table(V6.health);
-  const incentives = table(V6.incentiveSummary);
-  const staffing = table(V6.staffing);
-  return { ok:true, version:'v7-real-data-20260704', spreadsheet:s.getName(), sheets:Object.keys(V6).reduce((a,k)=>{a[k]=names.includes(V6[k]);return a;},{}), employees, leave, holidays:leave, health, incentives, staffing, dashboard: dashboardPairs(), sheetNames:names };
-}
-function table(sheetName){
-  const sh = sheet(sheetName);
-  if(!sh) return [];
-  const values = sh.getDataRange().getDisplayValues();
-  if(!values || !values.length) return [];
-  const headerIndex = findHeader(values, sheetName);
-  if(headerIndex < 0) return values.filter(r=>r.some(c=>String(c).trim())).map((r,i)=>rowObject(r.map((_,j)=>'col'+(j+1)), r, i+1));
-  const headers = normalizeHeaders(values[headerIndex]);
-  return values.slice(headerIndex+1).filter(r=>r.some(c=>String(c).trim() !== '')).map((r,i)=>rowObject(headers, r, headerIndex+2+i));
-}
-function findHeader(values, sheetName){
-  const must = sheetName === V6.employees ? ['이름'] : sheetName === V6.leave ? ['이름','날짜'] : sheetName === V6.health ? ['이름'] : ['이름'];
-  let best = -1, score = -1;
-  for(let i=0;i<Math.min(values.length,15);i++){
-    const row = values[i].map(x=>String(x).trim());
-    const joined = row.join('|');
-    let s = 0;
-    ['이름','직원명','현재누적','상태','직급','부서','날짜','구분','보건증','만료','시간','잔여'].forEach(k=>{ if(joined.includes(k)) s++; });
-    if(s > score){ score=s; best=i; }
+  sheets: {
+    dashboard: '00_Dashboard',
+    employees: '직원관리',
+    newEmployee: '신규입사_입력',
+    retire: '퇴사자_입력',
+    leave: '휴무입력',
+    holiday: '공휴일입력',
+    incentiveBase: '인센티브기초값',
+    incentiveRaw: '기존인센티브현황_원본',
+    manualAdjust: '수기조정',
+    incentiveLog: '인센티브로그',
+    incentiveSummary: '인센티브요약',
+    staffing: '근무인원',
+    health: '보건증현황',
+    homepageLog: '홈페이지로그',
+    notices: '공지사항'
   }
-  return score > 0 ? best : 0;
+};
+
+function doGet(e) {
+  const action = (e && e.parameter && e.parameter.action) || 'all';
+  return json(handle(action, e && e.parameter ? e.parameter : {}));
 }
-function normalizeHeaders(row){
-  const used = {};
-  return row.map((h,i)=>{
-    let key = String(h || '').trim() || ('col'+(i+1));
-    if(used[key]) { used[key] += 1; key = key + '_' + used[key]; } else used[key]=1;
-    return key;
+
+function doPost(e) {
+  let body = {};
+  try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) {}
+  return json(handle(body.action || 'all', body));
+}
+
+function json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+function ss() { return SpreadsheetApp.openById(MASTER_DB_ID); }
+function sheet(name) { return ss().getSheetByName(name); }
+function clean(value) { return String(value == null ? '' : value).trim(); }
+function fmt(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return value == null ? '' : value;
+}
+
+function findHeaderRow(values, requiredHeaders) {
+  const limit = Math.min(values.length, 30);
+  for (let r = 0; r < limit; r++) {
+    const row = values[r].map(clean);
+    const hit = requiredHeaders.filter(h => row.indexOf(h) !== -1 || row.join('|').indexOf(h) !== -1).length;
+    if (hit >= Math.min(requiredHeaders.length, 2)) return r;
+  }
+  // fallback: 가장 헤더처럼 보이는 줄 찾기
+  let best = -1, score = -1;
+  for (let r = 0; r < limit; r++) {
+    const joined = values[r].map(clean).join('|');
+    let s = 0;
+    ['이름','직원명','날짜','구분','상태','직급','부서','현재누적','보건증','만료','잔여','시간'].forEach(k => { if (joined.indexOf(k) !== -1) s++; });
+    if (s > score) { score = s; best = r; }
+  }
+  return score > 0 ? best : -1;
+}
+
+function tableRows(sheetName, requiredHeaders) {
+  const s = sheet(sheetName);
+  if (!s) return [];
+  const values = s.getDataRange().getValues();
+  if (!values.length) return [];
+  const headerIndex = findHeaderRow(values, requiredHeaders || []);
+  if (headerIndex < 0) return [];
+  const headers = values[headerIndex].map(function(h, i) { return clean(h) || ('col' + (i + 1)); });
+  const rows = [];
+  for (let r = headerIndex + 1; r < values.length; r++) {
+    const row = values[r];
+    const obj = { _row: r + 1 };
+    let hasValue = false;
+    headers.forEach(function(h, i) {
+      const v = fmt(row[i]);
+      obj[h] = v;
+      if (v !== '' && v !== null && v !== undefined) hasValue = true;
+    });
+    if (hasValue) { obj._row = r + 1; obj._sheet = sheetName; rows.push(obj); }
+  }
+  return rows;
+}
+
+function dashboardPairs() {
+  const s = sheet(V6.sheets.dashboard);
+  if (!s) return {};
+  const values = s.getDataRange().getValues();
+  const out = {};
+  values.forEach(function(row) {
+    for (let i = 0; i < row.length - 1; i++) {
+      const key = clean(row[i]);
+      const val = fmt(row[i + 1]);
+      if (key && val !== '') out[key] = val;
+    }
   });
-}
-function rowObject(headers, row, rowNumber){
-  const o = { _row: rowNumber };
-  headers.forEach((h,i)=> o[h] = row[i] || '');
-  return o;
-}
-function dashboardPairs(){
-  const sh = sheet(V6.dashboard);
-  if(!sh) return [];
-  const values = sh.getDataRange().getDisplayValues();
-  const out = [];
-  values.forEach((r,ri)=>r.forEach((c,ci)=>{ if(String(c).trim()) out.push({row:ri+1,col:ci+1,value:c}); }));
   return out;
 }
-function saveLeave(body){
-  const sh = sheet(V6.leave);
-  if(!sh) throw new Error('휴무입력 시트를 찾지 못했습니다.');
-  sh.appendRow([body.inputMonth || '', body.date || '', body.name || '', body.type || '휴무', body.memo || '', '홈페이지', new Date()]);
-  return {ok:true,message:'휴무 입력 완료'};
+function employees() { return tableRows(V6.sheets.employees, ['이름', '현재누적', '상태', '직급', '부서']).filter(function(r) { return clean(r['이름'] || r['직원명']) !== ''; }); }
+function leaveRows() { return tableRows(V6.sheets.leave, ['날짜', '이름', '구분']).concat(tableRows(V6.sheets.holiday, ['날짜', '공휴일', '이름', '구분'])); }
+function healthRows() { return tableRows(V6.sheets.health, ['이름', '보건증', '만료일', '상태']); }
+function incentiveRows() { return tableRows(V6.sheets.incentiveSummary, ['이름', '현재누적', '누적', '잔여']).concat(tableRows(V6.sheets.incentiveLog, ['날짜', '이름', '구분', '시간'])); }
+function staffingRows() { return tableRows(V6.sheets.staffing, ['날짜', '이름', '구분', '근무인원']); }
+function noticeRows() { return tableRows(V6.sheets.notices, ['작성일', '제목', '내용']).sort(function(a,b){ return Number(b._row||0)-Number(a._row||0); });
+
+function stats() {
+  const emp = employees();
+  const active = emp.filter(function(r) { const status = clean(r['상태']); return status !== '제외' && status !== '퇴사' && status !== '퇴사자'; });
+  const incentiveTarget = emp.filter(function(r) { return clean(r['직급']) !== '사장' && clean(r['상태']) !== '제외'; });
+  const twelvePlus = emp.filter(function(r) { return Number(r['현재누적'] || 0) >= 12; });
+  const totalHours = emp.reduce(function(sum, r) { return sum + (Number(r['현재누적'] || 0) || 0); }, 0);
+  return { totalEmployees: emp.length, activeEmployees: active.length, incentiveTarget: incentiveTarget.length, twelvePlus: twelvePlus.length, totalHours: totalHours, dashboard: dashboardPairs() };
 }
-function out(obj){
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+
+function all(params) {
+  const month = clean(params && params.month) || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM');
+  const workSync = syncWorkIncentives(month);
+  return {
+    ok: true,
+    version: 'v13-leave-count-incentive-20260704',
+    spreadsheet: ss().getName(),
+    sheets: Object.keys(V6.sheets).reduce(function(acc, k) { acc[k] = !!sheet(V6.sheets[k]); return acc; }, {}),
+    stats: stats(),
+    employees: employees(),
+    holidays: leaveRows(),
+    leave: leaveRows(),
+    health: healthRows(),
+    incentives: incentiveRows(),
+    staffing: staffingRows(),
+    notices: noticeRows(),
+    dashboard: dashboardPairs(),
+    workIncentiveSync: workSync
+  };
+}
+
+function handle(action, body) {
+  try {
+    if (action === 'ping') return { ok: true, spreadsheet: ss().getName(), version: 'v13-leave-count-incentive-20260704' };
+    if (action === 'all') return all(body);
+    if (action === 'employees') return { ok: true, employees: employees(), stats: stats() };
+    if (action === 'syncWorkIncentives') return syncWorkIncentives(clean(body.month) || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM'));
+    if (action === 'saveLeave') return saveLeave(body);
+    if (action === 'deleteLeave') return deleteLeave(body);
+    if (action === 'saveEmployee') return saveEmployee(body);
+    if (action === 'saveNotice') return saveNotice(body);
+    if (action === 'deleteNotice') return deleteNotice(body);
+    return all(body);
+  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err), stack: String(err && err.stack ? err.stack : '') }; }
+}
+
+function ensureSheet(name, headers) {
+  let s = sheet(name);
+  if (!s) s = ss().insertSheet(name);
+  if (s.getLastRow() === 0) s.appendRow(headers);
+  ensureColumns(s, headers);
+  return s;
+}
+
+function ensureColumns(s, headers) {
+  const lastCol = Math.max(s.getLastColumn(), 1);
+  const current = s.getRange(1, 1, 1, lastCol).getValues()[0].map(clean);
+  headers.forEach(function(h) {
+    if (current.indexOf(h) === -1) {
+      s.getRange(1, s.getLastColumn() + 1).setValue(h);
+      current.push(h);
+    }
+  });
+}
+
+function appendByHeader(s, obj) {
+  const lastCol = Math.max(s.getLastColumn(), 1);
+  const headers = s.getRange(1, 1, 1, lastCol).getValues()[0].map(clean);
+  const row = headers.map(function(h) { return Object.prototype.hasOwnProperty.call(obj, h) ? obj[h] : ''; });
+  s.appendRow(row);
+}
+
+function leaveCount(type) {
+  type = clean(type);
+  if (type === '반차+V') return 0.5;
+  if (type === 'V') return 1;
+  if (type === '휴무') return 1;
+  return 0;
+}
+
+function leaveDelta(type) {
+  type = clean(type);
+  if (type === '반차+V') return -6;
+  if (type === 'V') return -12;
+  return 0;
+}
+
+function saveLeave(body) {
+  const name = clean(body.name);
+  const date = clean(body.date);
+  const type = clean(body.type || '휴무');
+  const memo = clean(body.memo);
+  const inputMonth = clean(body.inputMonth) || date.slice(0, 7);
+  if (!name) return { ok: false, error: '이름을 선택하세요.' };
+  if (!date) return { ok: false, error: '날짜를 선택하세요.' };
+  if (['휴무', '반차+V', 'V'].indexOf(type) === -1) return { ok: false, error: '구분은 휴무/반차+V/V만 가능합니다.' };
+
+  const count = leaveCount(type);
+  const delta = leaveDelta(type);
+  const leaveSheet = ensureSheet(V6.sheets.leave, ['입력월', '날짜', '이름', '구분', '휴무갯수', '인센티브변동', '메모', '입력자', '입력시간']);
+  appendByHeader(leaveSheet, {
+    '입력월': inputMonth,
+    '날짜': date,
+    '이름': name,
+    '구분': type,
+    '휴무갯수': count,
+    '인센티브변동': delta,
+    '메모': memo,
+    '입력자': '홈페이지',
+    '입력시간': new Date()
+  });
+
+  if (delta !== 0) {
+    const adjSheet = ensureSheet(V6.sheets.manualAdjust, ['날짜', '이름', '구분', '휴무갯수', '시간', '메모', '입력자', '입력시간']);
+    appendByHeader(adjSheet, {
+      '날짜': date,
+      '이름': name,
+      '구분': type,
+      '휴무갯수': count,
+      '시간': delta,
+      '메모': memo || (type + ' 자동 차감'),
+      '입력자': '홈페이지',
+      '입력시간': new Date()
+    });
+  }
+
+  logHomepage('saveLeave', name + ' / ' + date + ' / ' + type + ' / count ' + count + ' / delta ' + delta);
+  return { ok: true, message: '휴무 입력 완료', count: count, delta: delta };
+}
+
+
+function deleteLeave(body) {
+  const row = Number(body.row || 0);
+  const sheetName = clean(body.sheetName);
+  const date = clean(body.date);
+  const name = clean(body.name);
+  const type = clean(body.type || '휴무');
+  if (!row || row < 2) return { ok: false, error: '삭제할 행 정보가 없습니다.' };
+  if (sheetName !== V6.sheets.leave) return { ok: false, error: '휴무입력 시트 자료만 삭제할 수 있습니다.' };
+  const s = sheet(V6.sheets.leave);
+  if (!s) return { ok: false, error: '휴무입력 시트를 찾을 수 없습니다.' };
+  if (row > s.getLastRow()) return { ok: false, error: '삭제할 행이 시트 범위를 벗어났습니다.' };
+
+  const delta = leaveDelta(type);
+  let restoreDelta = 0;
+  if (delta !== 0 && name && date) {
+    restoreDelta = -delta;
+    const adjSheet = ensureSheet(V6.sheets.manualAdjust, ['날짜', '이름', '구분', '휴무갯수', '시간', '메모', '입력자', '입력시간']);
+    appendByHeader(adjSheet, {
+      '날짜': date,
+      '이름': name,
+      '구분': type + ' 삭제복구',
+      '휴무갯수': leaveCount(type),
+      '시간': restoreDelta,
+      '메모': '홈페이지 휴무 삭제로 자동 복구',
+      '입력자': '홈페이지',
+      '입력시간': new Date()
+    });
+  }
+  s.deleteRow(row);
+  logHomepage('deleteLeave', name + ' / ' + date + ' / ' + type + ' / restore ' + restoreDelta);
+  return { ok: true, message: '휴무 삭제 완료', restoreDelta: restoreDelta };
+}
+
+function saveEmployee(body) {
+  const s = ensureSheet(V6.sheets.newEmployee, ['입력일', '이름', '직급', '부서', '상태', '메모']);
+  if (!clean(body.name)) return { ok: false, error: '이름을 입력하세요.' };
+  s.appendRow([new Date(), body.name || '', body.position || '', body.dept || '', body.status || '사용가능', '홈페이지 입력']);
+  return { ok: true, message: '직원 입력 완료' };
+}
+
+function toDateKey(value) {
+  const s = clean(fmt(value));
+  const m = s.match(/(\d{4})[.\/-]\s*(\d{1,2})[.\/-]\s*(\d{1,2})/);
+  if (m) return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  return s.slice(0, 10);
+}
+function dateRangeOfMonth(month) {
+  const y = Number(month.slice(0,4));
+  const m = Number(month.slice(5,7));
+  const out = [];
+  if (!y || !m) return out;
+  const last = new Date(y, m, 0).getDate();
+  for (let d = 1; d <= last; d++) out.push(new Date(y, m - 1, d));
+  return out;
+}
+function isActiveEmployee(row) {
+  const status = clean(row['상태'] || row['재직상태'] || row['사용여부']);
+  return status.indexOf('퇴사') === -1 && status.indexOf('제외') === -1 && status.indexOf('비활성') === -1;
+}
+function employeeName(row) { return clean(row['이름'] || row['직원명'] || row['성명'] || row['name']); }
+function getHolidayMap() {
+  const rows = tableRows(V6.sheets.holiday, ['날짜', '공휴일']);
+  const map = {};
+  rows.forEach(function(r) {
+    const d = toDateKey(r['날짜'] || r['일자'] || r['공휴일일자']);
+    if (d) map[d] = clean(r['공휴일'] || r['명칭'] || r['이름'] || r['구분'] || '공휴일');
+  });
+  return map;
+}
+function getLeaveOffMap(month) {
+  const rows = tableRows(V6.sheets.leave, ['날짜', '이름', '구분']);
+  const map = {};
+  rows.forEach(function(r) {
+    const d = toDateKey(r['날짜'] || r['일자'] || r['휴무일']);
+    if (d.slice(0,7) !== month) return;
+    const name = clean(r['이름'] || r['직원명'] || r['성명']);
+    const type = clean(r['구분'] || r['휴무구분'] || '휴무');
+    if (!d || !name) return;
+    if (type === '휴무' || type === 'V' || type === '반차+V') map[d + '|' + name] = type;
+  });
+  return map;
+}
+function existingAutoIncentiveKeys() {
+  const rows = tableRows(V6.sheets.incentiveLog, ['날짜', '이름', '구분', '시간']);
+  const map = {};
+  rows.forEach(function(r) {
+    const d = toDateKey(r['날짜'] || r['일자']);
+    const name = clean(r['이름'] || r['직원명'] || r['성명']);
+    const type = clean(r['구분'] || r['사유'] || r['내용']);
+    const memo = clean(r['메모'] || r['비고'] || r['내용']);
+    if (memo.indexOf('AUTO_WORK_INC:') !== -1) {
+      const m = memo.match(/AUTO_WORK_INC:([^\s]+)/);
+      if (m) map[m[1]] = true;
+    }
+    if (d && name && (type === '토요일근무' || type === '일요일근무' || type === '공휴일근무')) map[d + '|' + name] = true;
+  });
+  return map;
+}
+function syncWorkIncentives(month) {
+  month = clean(month) || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM');
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (e) {}
+  try {
+    const holidays = getHolidayMap();
+    const offMap = getLeaveOffMap(month);
+    const existing = existingAutoIncentiveKeys();
+    const active = employees().filter(isActiveEmployee).map(employeeName).filter(Boolean);
+    const logSheet = ensureSheet(V6.sheets.incentiveLog, ['날짜', '이름', '구분', '시간', '메모', '입력자', '입력시간']);
+    let added = 0;
+    const preview = [];
+    dateRangeOfMonth(month).forEach(function(dt) {
+      const date = Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+      const day = dt.getDay();
+      const isSat = day === 6;
+      const isSun = day === 0;
+      const isHoliday = !!holidays[date];
+      if (!isSat && !isSun && !isHoliday) return;
+      const reason = isHoliday ? '공휴일근무' : (isSat ? '토요일근무' : '일요일근무');
+      active.forEach(function(name) {
+        if (offMap[date + '|' + name]) return;
+        const key = date + '|' + name;
+        preview.push({ 날짜: date, 이름: name, 구분: reason, 시간: 1, 공휴일: holidays[date] || '' });
+        if (existing[key]) return;
+        logSheet.appendRow([date, name, reason, 1, 'AUTO_WORK_INC:' + key + ' 토/일/공휴일 근무 자동 적립', '홈페이지', new Date()]);
+        existing[key] = true;
+        added++;
+      });
+    });
+    return { ok: true, month: month, added: added, previewCount: preview.length, preview: preview.slice(0, 200), rule: '토요일/일요일/공휴일 근무 +1시간' };
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function logHomepage(action, detail) {
+  try {
+    const s = ensureSheet(V6.sheets.homepageLog, ['시간', '액션', '내용']);
+    s.appendRow([new Date(), action, detail]);
+  } catch (e) {}
+}
+
+
+function saveNotice(body) {
+  const title = clean(body.title);
+  const content = clean(body.content);
+  const author = clean(body.author || '관리자');
+  if (!title) return { ok: false, error: '제목을 입력하세요.' };
+  if (!content) return { ok: false, error: '내용을 입력하세요.' };
+  const s = ensureSheet(V6.sheets.notices, ['작성일', '제목', '내용', '작성자', '입력시간']);
+  appendByHeader(s, {
+    '작성일': Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+    '제목': title,
+    '내용': content,
+    '작성자': author,
+    '입력시간': new Date()
+  });
+  logHomepage('saveNotice', title);
+  return { ok: true, message: '공지 저장 완료' };
+}
+
+function deleteNotice(body) {
+  const row = Number(body.row || 0);
+  const sheetName = clean(body.sheetName);
+  if (sheetName !== V6.sheets.notices) return { ok: false, error: '공지사항 시트 자료만 삭제할 수 있습니다.' };
+  if (!row || row < 2) return { ok: false, error: '삭제할 행 정보가 없습니다.' };
+  const s = sheet(V6.sheets.notices);
+  if (!s) return { ok: false, error: '공지사항 시트를 찾을 수 없습니다.' };
+  if (row > s.getLastRow()) return { ok: false, error: '삭제할 행이 시트 범위를 벗어났습니다.' };
+  s.deleteRow(row);
+  logHomepage('deleteNotice', 'row ' + row);
+  return { ok: true, message: '공지 삭제 완료' };
 }
