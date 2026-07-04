@@ -11,6 +11,13 @@ export async function GET(req: Request) {
     const res = await fetch(url.toString(), { cache:'no-store', redirect:'follow' });
     const text = await res.text();
     try { return NextResponse.json(JSON.parse(text)); }
-    catch { return NextResponse.json({ ok:false, error:'Apps Script JSON 아님', raw:text.slice(0,1000) }, { status: 502 }); }
+catch {
+  return NextResponse.json({
+    ok: false,
+    error: 'Apps Script JSON 아님',
+    apiUrl: base,
+    raw: text.slice(0, 1000)
+  }, { status: 200 });
+}
   } catch(e:any) { return NextResponse.json({ ok:false, error:String(e?.message || e) }, { status: 500 }); }
 }
